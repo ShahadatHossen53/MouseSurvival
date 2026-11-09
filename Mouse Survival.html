@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mouse Survival - Arcade Game</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.3/p5.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{overflow:hidden;background:#070B14;font-family:Arial,sans-serif}
+canvas{display:block}
+</style>
+</head>
+<body>
+<script>
+const CFG = { radius: 16, spawn: 5000, delay: 2000, safe: 3000, hits: 10, first: 20, perLevel: 10, countdown: 3000 };
+const COL = { danger: "#EF4444", safe: "#22C55E", player: "#38BDF8", accent: "#38BDF8", panel: "#111A2E", panel2: "#16223B", text: "#E2E8F0", mute: "#94A3B8", gold: "#FACC15" };
+const CUSTOM = 11, DW = 760, DH = 580;
+const STEPPERS = [
+  { key: "balls", label: "MAX BALLS", cx: 390, step: 5, min: 1, max: 200 },
+  { key: "hits", label: "MAX HITS", cx: 620, step: 1, min: 1, max: 50 }
+];
+
+let state = "dashboard", selected = 1, player, balls = [];
+let hits = 0, maxHits = CFG.hits, maxBalls = 20;
+let countStart = 0, startTime = 0, lastSpawn = 0, lastHit = -9999, survival = 0, dt = 0, lastFrame = 0;
+let highScores = {}, custom = { balls: 30, hits: 10 };
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  textFont("Arial");
+  loadData();
+  player = { pos: createVector(0, 0), r: CFG.radius };
+  lastFrame = millis();
+}
+
+function windowResized() { resizeCanvas(windowWidth, windowHeight); }
+
+// ---------- storage ----------
+function loadData() {
+  try {
+    highScores = JSON.parse(localStorage.getItem("mouseSurvivalScores") || "{}") || {};
+    const c = JSON.parse(localStorage.getItem("mouseSurvivalCustom") || "null");
+    if (c) custom = { balls: constrain(+c.balls || 30, 1, 200), hits: constrain(+c.hits || 10, 1, 50) };
+  } catch (e) { highScores = {}; }
+}
+function saveCustom() {
+  try { localStorage.setItem("mouseSurvivalCustom", JSON.stringify(custom)); } catch (e) {}
+}
+function saveScore(level, s) {
+  if (s > (highScores[level] || 0)) {
+    highScores[level] = s;
+    try { localStorage.setItem("mouseSurvivalScores", JSON.stringify(highScores)); } catch (e) {}
+  }
+}
+
+// ---------- helpers ----------
+const levelBalls = l => l === CUSTOM ? custom.balls : CFG.first + (l - 1) * CFG.perLevel;
+const levelHits = l => l === CUSTOM ? custom.hits : CFG.hits;
+const fmt = s => nf(floor(s / 60), 2) + ":" + nf(floor(s) % 60, 2);
+const inR = (x, y, r) => x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3];
+const hitsLeft = () => max(0, maxHits - hits);
+
+function T(str, x, y, size, col, al, bold) {
+  noStroke(); fill(col); textAlign(al || CENTER, CENTER); textSize(size);
+  textStyle(bold ? BOLD : NORMAL); text(str, x, y);
+}
+function btn(r, label, col, hover) {
+  noStroke(); fill(col); rect(r[0], r[1], r[2], r[3], 10);
+  if (hover) { fill(255, 255, 255, 28); rect(r[0], r[1], r[2], r[3], 10); }
+  T(label, r[0] + r[2] / 2, r[1] + r[3] / 2, 15, "#fff", CENTER, true);
+}
+
+// dashboard layout (design space)
+const cardR = i => [6 + (i % 5) * 152, 140 + floor(i / 5) * 102, 140, 90];
+const customR = [6, 350, 748, 104];
+const startR = [280, 480, 200, 50];
+const minusR = s => [s.cx - 78, 392, 34, 34];
+const plusR = s => [s.cx + 44, 392, 34, 34];
+function view() {
+  const s = min(1, width / DW, height / DH);
+  return { s, ox: (width - DW * s) / 2, oy: (height - DH * s) / 2 };
+}
+function toDesign() { const v = view(); return [(mouseX - v.ox) / v.s, (mouseY - v.oy) / v.s]; }
+
+// game over layout
+const goTry = () => [width / 2 - 160, height / 2 + 55, 145, 45];
+const goDash = () => [width / 2 + 15, height / 2 + 55, 145, 45];
+const dashBtn = () => [width - 145, height - 55, 125, 38];
+
+// ---------- main loop ----------
+function draw() {
+  const now = millis();
+  dt = min((now - lastFrame) / 1000, 0.05);
+  lastFrame = now;
+  background(7, 11, 20);
+  drawBackground();
+
+  if (state === "dashboard") { drawDashboard(); return; }
+
+  if (state === "countdown" || state === "playing") noCursor(); else cursor(ARROW);
+  updatePlayer();
+
+  if (state === "countdown") {
+    if (now - countStart >= CFG.countdown) {
+      state = "playing"; startTime = now; lastSpawn = now; spawnBall(now);
+    }
+  }
+  if (state === "playing") updateGame(now);
+
+  drawGame(now);
+  if (state === "countdown") drawCountdown(now);
+  if (state === "gameover") drawGameOver();
+}
+
+function drawBackground() {
+  noStroke();
+  for (let y = 0; y < height; y += 4) { fill(10 + y / height * 8, 16 + y / height * 10, 32 + y / height * 14, 40); rect(0, y, width, 4); }
+  fill(56, 189, 248, 28);
+  for (let x = 20; x < width; x += 40) for (let y = 20; y < height; y += 40) circle(x, y, 2);
+}
+
+// ---------- dashboard ----------
+function drawDashboard() {
+  const v = view(), [mx, my] = toDesign();
+  push(); translate(v.ox, v.oy); scale(v.s);
+  let hover = false;
+
+  T("MOUSE SURVIVAL", DW / 2, 42, 38, "#fff", CENTER, true);
+  T("Dodge the red balls. Green balls are safe. Survive as long as you can.", DW / 2, 80, 14, COL.mute);
+  T("SELECT DIFFICULTY", DW / 2, 118, 13, COL.accent, CENTER, true);
+
+  for (let i = 1; i <= 10; i++) {
+    const r = cardR(i - 1), sel = selected === i, h = inR(mx, my, r);
+    hover = hover || h;
+    noStroke(); fill(sel ? "#173A5E" : h ? "#1B2A47" : COL.panel); rect(r[0], r[1], r[2], r[3], 12);
+    if (sel) { noFill(); stroke(COL.accent); strokeWeight(2); rect(r[0], r[1], r[2], r[3], 12); }
+    T("LEVEL " + i, r[0] + 70, r[1] + 24, 18, sel ? COL.accent : "#fff", CENTER, true);
+    T("Max balls: " + levelBalls(i), r[0] + 70, r[1] + 52, 12, COL.mute);
+    T("Best: " + fmt(highScores[i] || 0), r[0] + 70, r[1] + 72, 12, COL.gold);
+  }
+
+  // custom level panel
+  const sel = selected === CUSTOM, hc = inR(mx, my, customR);
+  noStroke(); fill(sel ? "#173A5E" : COL.panel); rect(...customR, 12);
+  if (sel) { noFill(); stroke(COL.accent); strokeWeight(2); rect(...customR, 12); }
+  else if (hc) { noFill(); stroke(255, 255, 255, 40); strokeWeight(1); rect(...customR, 12); }
+  hover = hover || hc;
+  T("CUSTOM LEVEL", 100, 380, 18, sel ? COL.accent : "#fff", CENTER, true);
+  T("Set your own rules", 100, 404, 12, COL.mute);
+  T("Best: " + fmt(highScores[CUSTOM] || 0), 100, 428, 12, COL.gold);
+  for (const s of STEPPERS) {
+    T(s.label, s.cx, 372, 12, COL.mute, CENTER, true);
+    T(custom[s.key], s.cx, 409, 28, "#fff", CENTER, true);
+    for (const [r, sym] of [[minusR(s), "−"], [plusR(s), "+"]]) {
+      const h = inR(mx, my, r); hover = hover || h;
+      noStroke(); fill(h ? "#3B5B8C" : "#26395E"); rect(...r, 8);
+      T(sym, r[0] + 17, r[1] + 16, 22, "#fff", CENTER, true);
+    }
+  }
+
+  const hs = inR(mx, my, startR); hover = hover || hs;
+  btn(startR, "START GAME", "#2563EB", hs);
+  const lbl = selected === CUSTOM ? "Custom" : "Level " + selected;
+  T(lbl + "  |  " + levelBalls(selected) + " balls  |  " + levelHits(selected) + " hits allowed", DW / 2, 552, 13, COL.mute);
+  T("Move your mouse to control the blue player", DW / 2, 572, 11, "#64748B");
+  pop();
+  cursor(hover ? HAND : ARROW);
+}
+
+// ---------- game flow ----------
+function startGame() {
+  balls = []; hits = 0; survival = 0;
+  maxBalls = levelBalls(selected); maxHits = levelHits(selected);
+  countStart = millis(); lastHit = -9999;
+  state = "countdown";
+}
+
+function updatePlayer() {
+  const r = player.r;
+  player.pos.set(constrain(mouseX, r, width - r), constrain(mouseY, r, height - r));
+}
+
+function updateGame(now) {
+  survival = (now - startTime) / 1000;
+  if (now - lastSpawn >= CFG.spawn && balls.length < maxBalls) { spawnBall(now); lastSpawn = now; }
+  for (const b of balls) { b.update(now, dt); checkCollision(b, now); }
+  if (hits >= maxHits) { state = "gameover"; saveScore(selected, survival); }
+}
+
+function spawnBall(now) { if (balls.length < maxBalls) balls.push(new Ball(now)); }
+
+class Ball {
+  constructor(now) {
+    this.pos = createVector(width / 2 + random(-15, 15), height / 2 + random(-15, 15));
+    this.r = random(6, 15);
+    this.vel = p5.Vector.random2D().mult(random(120, 190));
+    this.created = now;
+    this.safeUntil = now + CFG.safe;
+    this.touching = false;
+  }
+  update(now, dt) {
+    if (now - this.created < CFG.delay) return;
+    this.pos.add(p5.Vector.mult(this.vel, dt));
+    if (this.pos.x < this.r) { this.pos.x = this.r; this.vel.x = abs(this.vel.x); }
+    if (this.pos.x > width - this.r) { this.pos.x = width - this.r; this.vel.x = -abs(this.vel.x); }
+    if (this.pos.y < this.r) { this.pos.y = this.r; this.vel.y = abs(this.vel.y); }
+    if (this.pos.y > height - this.r) { this.pos.y = height - this.r; this.vel.y = -abs(this.vel.y); }
+  }
+  display(now) {
+    const safe = now < this.safeUntil, c = safe ? COL.safe : COL.danger;
+    drawingContext.shadowBlur = 16; drawingContext.shadowColor = c;
+    noStroke(); fill(c); circle(this.pos.x, this.pos.y, this.r * 2);
+    drawingContext.shadowBlur = 0;
+    if (now - this.created < CFG.delay)
+      T(ceil((CFG.delay - (now - this.created)) / 1000), this.pos.x, this.pos.y - this.r - 12, 11, "#fff");
+  }
+}
+
+function checkCollision(b, now) {
+  if (now - b.created < CFG.delay) return;
+  const touching = p5.Vector.dist(player.pos, b.pos) < player.r + b.r;
+  if (touching && now >= b.safeUntil && !b.touching) {
+    hits++; lastHit = now; b.safeUntil = now + CFG.safe;
+  }
+  b.touching = touching;
+}
+
+// ---------- drawing the game ----------
+function drawGame(now) {
+  for (const b of balls) b.display(now);
+  drawPlayer(now);
+  drawHUD(now);
+}
+
+function drawPlayer(now) {
+  const p = player.pos, left = hitsLeft(), low = left <= max(2, maxHits * 0.25);
+  const since = now - lastHit;
+  if (since < 500) { noFill(); stroke(239, 68, 68, 255 * (1 - since / 500)); strokeWeight(3); circle(p.x, p.y, player.r * 2 + since / 8); }
+  drawingContext.shadowBlur = 20; drawingContext.shadowColor = low ? COL.gold : COL.player;
+  stroke(low ? COL.gold : "#fff"); strokeWeight(2); fill(COL.player);
+  circle(p.x, p.y, player.r * 2);
+  drawingContext.shadowBlur = 0;
+  T(left, p.x, p.y + 1, left > 99 ? 12 : 16, "#0B1220", CENTER, true);
+}
+
+function drawHUD(now) {
+  noStroke(); fill(15, 23, 42, 225); rect(15, 15, 240, 128, 12);
+  T(selected === CUSTOM ? "CUSTOM LEVEL" : "LEVEL " + selected, 30, 36, 15, "#fff", LEFT, true);
+  T("Survival: " + fmt(survival), 30, 60, 13, COL.gold, LEFT);
+  const left = hitsLeft(), ratio = left / maxHits;
+  T("Hits left: " + left + " / " + maxHits, 30, 84, 13, ratio <= 0.3 ? "#F87171" : "#fff", LEFT);
+  fill("#1E293B"); rect(30, 97, 210, 8, 4);
+  fill(ratio > 0.5 ? COL.safe : ratio > 0.3 ? COL.gold : COL.danger); rect(30, 97, 210 * ratio, 8, 4);
+  T("Balls: " + balls.length + " / " + maxBalls, 30, 124, 12, "#93C5FD", LEFT);
+
+  fill(15, 23, 42, 225); rect(width - 135, 15, 120, 62, 10);
+  noStroke(); fill(COL.safe); circle(width - 120, 35, 12); T("Safe", width - 105, 35, 11, "#fff", LEFT);
+  fill(COL.danger); circle(width - 120, 58, 12); T("Danger", width - 105, 58, 11, "#fff", LEFT);
+
+  if (state !== "gameover") btn(dashBtn(), "DASHBOARD", "#334155", inR(mouseX, mouseY, dashBtn()));
+}
+
+function drawCountdown(now) {
+  const el = now - countStart, n = ceil((CFG.countdown - el) / 1000), f = (el % 1000) / 1000;
+  noStroke(); fill(0, 0, 0, 90); rect(0, 0, width, height);
+  T("GET READY", width / 2, height / 2 - 110, 20, COL.mute, CENTER, true);
+  push(); translate(width / 2, height / 2); scale(1.25 - f * 0.25);
+  drawingContext.shadowBlur = 30; drawingContext.shadowColor = COL.accent;
+  T(n, 0, 0, 140, COL.accent, CENTER, true);
+  drawingContext.shadowBlur = 0; pop();
+  T("First ball arrives when the countdown ends", width / 2, height / 2 + 110, 14, COL.mute);
+}
+
+function drawGameOver() {
+  noStroke(); fill(0, 0, 0, 190); rect(0, 0, width, height);
+  const cx = width / 2, cy = height / 2;
+  T("GAME OVER", cx, cy - 80, 42, "#F87171", CENTER, true);
+  T("Survival time: " + fmt(survival), cx, cy - 30, 18, "#fff");
+  T((selected === CUSTOM ? "Custom" : "Level " + selected) + " Best: " + fmt(highScores[selected] || 0), cx, cy + 5, 16, COL.gold);
+  btn(goTry(), "TRY AGAIN", "#2563EB", inR(mouseX, mouseY, goTry()));
+  btn(goDash(), "DASHBOARD", "#334155", inR(mouseX, mouseY, goDash()));
+}
+
+// ---------- input ----------
+function mousePressed() {
+  if (state === "dashboard") {
+    const [mx, my] = toDesign();
+    for (const s of STEPPERS) {
+      for (const [r, d] of [[minusR(s), -1], [plusR(s), 1]]) {
+        if (inR(mx, my, r)) {
+          custom[s.key] = constrain(custom[s.key] + d * s.step, s.min, s.max);
+          if (custom[s.key] > s.min && s.step > 1 && d < 0 && custom[s.key] % s.step) custom[s.key] = max(s.min, round(custom[s.key] / s.step) * s.step);
+          selected = CUSTOM; saveCustom(); return;
+        }
+      }
+    }
+    for (let i = 1; i <= 10; i++) if (inR(mx, my, cardR(i - 1))) { selected = i; return; }
+    if (inR(mx, my, customR)) { selected = CUSTOM; return; }
+    if (inR(mx, my, startR)) startGame();
+    return;
+  }
+  if (state === "playing" || state === "countdown") {
+    if (inR(mouseX, mouseY, dashBtn())) state = "dashboard";
+    return;
+  }
+  if (state === "gameover") {
+    if (inR(mouseX, mouseY, goTry())) startGame();
+    else if (inR(mouseX, mouseY, goDash())) state = "dashboard";
+  }
+}
+
+function keyPressed() {
+  if (keyCode === ESCAPE && state !== "dashboard") state = "dashboard";
+}
+</script>
+</body>
+</html>

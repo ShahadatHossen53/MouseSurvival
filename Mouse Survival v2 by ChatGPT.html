@@ -1,0 +1,1714 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Mouse Survival V2 - Physics Arcade</title>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.3/p5.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            height: 100%;
+        }
+
+        body {
+            overflow: hidden;
+            background: #070B14;
+            font-family: Arial, sans-serif;
+        }
+
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+
+<body>
+
+    <script>
+        const { Engine, Bodies, Body, Composite, Vector } = Matter;
+
+        const CFG = {
+            radius: 16,
+            spawn: 5000,
+            delay: 2000,
+            safe: 3000,
+            hits: 10,
+            first: 20,
+            perLevel: 10,
+            countdown: 3000,
+            maxSpeed: 650
+        };
+
+        const COL = {
+            danger: "#EF4444",
+            safe: "#22C55E",
+            player: "#38BDF8",
+            accent: "#38BDF8",
+            panel: "#111A2E",
+            mute: "#94A3B8",
+            gold: "#FACC15"
+        };
+
+        const DW = 760;
+        const DH = 500;
+        const M = 16;
+        const STEP = 1 / 240;
+
+        let engine;
+        let walls = [];
+        let pBody;
+        let balls = [];
+        let acc = 0;
+
+        let state = "dashboard";
+        let selected = 1;
+
+        let hits = 0;
+        let maxHits = CFG.hits;
+        let maxBalls = 20;
+
+        let gt = 0;
+        let countStart = 0;
+        let lastSpawn = 0;
+        let lastHit = -9999;
+        let survival = 0;
+        let dt = 0;
+        let lastFrame = 0;
+
+        let highScores = {};
+        let resuming = false;
+        let confirmExit = false;
+
+
+        // --------------------------------------------------
+        // SETUP
+        // --------------------------------------------------
+
+        function setup() {
+            createCanvas(windowWidth, windowHeight);
+
+            textFont("Arial");
+
+            try {
+                highScores = JSON.parse(
+                    localStorage.getItem("mouseSurvivalScores") || "{}"
+                ) || {};
+            } catch (e) {
+                highScores = {};
+            }
+
+            engine = Engine.create();
+
+            engine.gravity.x = 0;
+            engine.gravity.y = 0;
+            engine.gravity.scale = 0;
+
+            // Player is a sensor.
+            // This allows manual collision detection without
+            // Matter.js physically pushing the player away.
+            pBody = Bodies.circle(
+                width / 2,
+                height / 2,
+                CFG.radius,
+                {
+                    restitution: 0,
+                    friction: 0,
+                    frictionStatic: 0,
+                    frictionAir: 0,
+                    density: 0.002,
+                    inertia: Infinity,
+                    isSensor: true
+                }
+            );
+
+            Composite.add(engine.world, pBody);
+
+            buildWalls();
+
+            lastFrame = millis();
+        }
+
+
+        // --------------------------------------------------
+        // ARENA WALLS
+        // --------------------------------------------------
+
+        function buildWalls() {
+            Composite.remove(engine.world, walls);
+
+            const o = {
+                isStatic: true,
+                restitution: 1,
+                friction: 0,
+                frictionStatic: 0
+            };
+
+            const W = width;
+            const H = height;
+
+            walls = [
+                Bodies.rectangle(
+                    W / 2,
+                    M - 100,
+                    W + 400,
+                    200,
+                    o
+                ),
+
+                Bodies.rectangle(
+                    W / 2,
+                    H - M + 100,
+                    W + 400,
+                    200,
+                    o
+                ),
+
+                Bodies.rectangle(
+                    M - 100,
+                    H / 2,
+                    200,
+                    H + 400,
+                    o
+                ),
+
+                Bodies.rectangle(
+                    W - M + 100,
+                    H / 2,
+                    200,
+                    H + 400,
+                    o
+                )
+            ];
+
+            Composite.add(engine.world, walls);
+        }
+
+
+        // Keep the player inside the visible arena.
+        // Since the player is a sensor, we must do this manually.
+
+        function keepPlayerInsideArena() {
+            const p = pBody.position;
+            const v = pBody.velocity;
+            const r = CFG.radius;
+
+            const minX = M + r;
+            const maxX = max(minX, width - M - r);
+
+            const minY = M + r;
+            const maxY = max(minY, height - M - r);
+
+            const x = constrain(p.x, minX, maxX);
+            const y = constrain(p.y, minY, maxY);
+
+            if (x !== p.x || y !== p.y) {
+                Body.setPosition(pBody, { x, y });
+
+                Body.setVelocity(pBody, {
+                    x: x !== p.x ? 0 : v.x,
+                    y: y !== p.y ? 0 : v.y
+                });
+            }
+        }
+
+
+        // Keep balls inside the arena and correct their
+        // velocity when they cross a boundary.
+
+        function keepBallInsideArena(ball) {
+            const body = ball.body;
+            const r = ball.r;
+
+            const minX = M + r;
+            const maxX = max(minX, width - M - r);
+
+            const minY = M + r;
+            const maxY = max(minY, height - M - r);
+
+            let x = body.position.x;
+            let y = body.position.y;
+
+            let vx = body.velocity.x;
+            let vy = body.velocity.y;
+
+            if (x < minX) {
+                x = minX;
+
+                if (vx < 0) {
+                    vx = -vx;
+                }
+            }
+
+            if (x > maxX) {
+                x = maxX;
+
+                if (vx > 0) {
+                    vx = -vx;
+                }
+            }
+
+            if (y < minY) {
+                y = minY;
+
+                if (vy < 0) {
+                    vy = -vy;
+                }
+            }
+
+            if (y > maxY) {
+                y = maxY;
+
+                if (vy > 0) {
+                    vy = -vy;
+                }
+            }
+
+            if (
+                x !== body.position.x ||
+                y !== body.position.y
+            ) {
+                Body.setPosition(body, { x, y });
+            }
+
+            if (
+                vx !== body.velocity.x ||
+                vy !== body.velocity.y
+            ) {
+                Body.setVelocity(body, { x: vx, y: vy });
+            }
+        }
+
+
+        function windowResized() {
+            resizeCanvas(windowWidth, windowHeight);
+
+            buildWalls();
+
+            const bodies = [
+                pBody,
+                ...balls.map(b => b.body)
+            ];
+
+            for (const body of bodies) {
+                const r = body.circleRadius;
+
+                const minX = M + r;
+                const maxX = max(minX, width - M - r);
+
+                const minY = M + r;
+                const maxY = max(minY, height - M - r);
+
+                Body.setPosition(body, {
+                    x: constrain(body.position.x, minX, maxX),
+                    y: constrain(body.position.y, minY, maxY)
+                });
+            }
+        }
+
+
+        // --------------------------------------------------
+        // HELPERS
+        // --------------------------------------------------
+
+        const levelBalls = l =>
+            CFG.first + (l - 1) * CFG.perLevel;
+
+        const fmt = s =>
+            nf(floor(s / 60), 2) + ":" + nf(floor(s) % 60, 2);
+
+        const inR = (x, y, r) =>
+            x >= r[0] &&
+            x <= r[0] + r[2] &&
+            y >= r[1] &&
+            y <= r[1] + r[3];
+
+        const hitsLeft = () =>
+            max(0, maxHits - hits);
+
+        const target = () => {
+            const r = CFG.radius;
+
+            return {
+                x: constrain(mouseX, M + r, max(M + r, width - M - r)),
+                y: constrain(mouseY, M + r, max(M + r, height - M - r))
+            };
+        };
+
+
+        function T(str, x, y, size, col, al, bold) {
+            noStroke();
+
+            fill(col);
+
+            textAlign(al || CENTER, CENTER);
+
+            textSize(size);
+
+            textStyle(bold ? BOLD : NORMAL);
+
+            text(str, x, y);
+        }
+
+
+        function btn(r, label, col, hover) {
+            noStroke();
+
+            fill(col);
+
+            rect(
+                r[0],
+                r[1],
+                r[2],
+                r[3],
+                10
+            );
+
+            if (hover) {
+                fill(255, 255, 255, 28);
+
+                rect(
+                    r[0],
+                    r[1],
+                    r[2],
+                    r[3],
+                    10
+                );
+            }
+
+            T(
+                label,
+                r[0] + r[2] / 2,
+                r[1] + r[3] / 2,
+                15,
+                "#fff",
+                CENTER,
+                true
+            );
+        }
+
+
+        const cardR = i => [
+            6 + (i % 5) * 152,
+            140 + floor(i / 5) * 102,
+            140,
+            90
+        ];
+
+        const startR = [280, 364, 200, 50];
+
+        function view() {
+            const s = min(1, width / DW, height / DH);
+
+            return {
+                s,
+                ox: (width - DW * s) / 2,
+                oy: (height - DH * s) / 2
+            };
+        }
+
+
+        function toDesign() {
+            const v = view();
+
+            return [
+                (mouseX - v.ox) / v.s,
+                (mouseY - v.oy) / v.s
+            ];
+        }
+
+
+        const goTry = () => [
+            width / 2 - 160,
+            height / 2 + 55,
+            145,
+            45
+        ];
+
+        const goDash = () => [
+            width / 2 + 15,
+            height / 2 + 55,
+            145,
+            45
+        ];
+
+        const pauseResume = () => [
+            width / 2 - 160,
+            height / 2 + 30,
+            145,
+            45
+        ];
+
+        const pauseDash = () => [
+            width / 2 + 15,
+            height / 2 + 30,
+            145,
+            45
+        ];
+
+        const cfmExit = () => [
+            width / 2 - 160,
+            height / 2 + 35,
+            145,
+            45
+        ];
+
+        const cfmCancel = () => [
+            width / 2 + 15,
+            height / 2 + 35,
+            145,
+            45
+        ];
+
+
+        // --------------------------------------------------
+        // MAIN LOOP
+        // --------------------------------------------------
+
+        function draw() {
+            const now = millis();
+
+            dt = min((now - lastFrame) / 1000, 0.05);
+
+            lastFrame = now;
+
+            background(7, 11, 20);
+
+            drawBackground();
+
+            if (state === "dashboard") {
+                drawDashboard();
+                return;
+            }
+
+            if (
+                state === "countdown" ||
+                state === "playing"
+            ) {
+                noCursor();
+            } else {
+                cursor(ARROW);
+            }
+
+
+            if (state === "countdown") {
+                glidePlayer();
+
+                if (now - countStart >= CFG.countdown) {
+
+                    if (resuming) {
+                        resuming = false;
+
+                        for (const b of balls) {
+                            b.touching = true;
+                        }
+
+                    } else {
+                        lastSpawn = gt;
+                        spawnBall();
+                    }
+
+                    state = "playing";
+                }
+            }
+
+
+            if (state === "playing") {
+                updateGame();
+            }
+
+
+            drawGame();
+
+            if (state === "countdown") {
+                drawCountdown(now);
+            }
+
+            if (state === "paused") {
+                drawPause();
+            }
+
+            if (state === "gameover") {
+                drawGameOver();
+            }
+        }
+
+
+        // --------------------------------------------------
+        // BACKGROUND
+        // --------------------------------------------------
+
+        function drawBackground() {
+            noStroke();
+
+            for (let y = 0; y < height; y += 4) {
+                fill(
+                    10 + y / height * 8,
+                    16 + y / height * 10,
+                    32 + y / height * 14,
+                    40
+                );
+
+                rect(0, y, width, 4);
+            }
+
+            fill(56, 189, 248, 28);
+
+            for (let x = 20; x < width; x += 40) {
+                for (let y = 20; y < height; y += 40) {
+                    circle(x, y, 2);
+                }
+            }
+        }
+
+
+        // --------------------------------------------------
+        // DASHBOARD
+        // --------------------------------------------------
+
+        function drawDashboard() {
+            const v = view();
+
+            const [mx, my] = toDesign();
+
+            push();
+
+            translate(v.ox, v.oy);
+
+            scale(v.s);
+
+            let hover = false;
+
+            T(
+                "MOUSE SURVIVAL",
+                DW / 2,
+                42,
+                38,
+                "#fff",
+                CENTER,
+                true
+            );
+
+            T(
+                "V2 · PHYSICS EDITION",
+                DW / 2,
+                68,
+                12,
+                COL.accent,
+                CENTER,
+                true
+            );
+
+            T(
+                "Dodge the red balls. Green balls are safe. Bigger balls hit harder.",
+                DW / 2,
+                92,
+                14,
+                COL.mute
+            );
+
+            T(
+                "SELECT DIFFICULTY",
+                DW / 2,
+                120,
+                13,
+                COL.accent,
+                CENTER,
+                true
+            );
+
+
+            for (let i = 1; i <= 10; i++) {
+                const r = cardR(i - 1);
+
+                const sel = selected === i;
+
+                const h = inR(mx, my, r);
+
+                hover = hover || h;
+
+                noStroke();
+
+                fill(
+                    sel
+                        ? "#173A5E"
+                        : h
+                            ? "#1B2A47"
+                            : COL.panel
+                );
+
+                rect(
+                    r[0],
+                    r[1],
+                    r[2],
+                    r[3],
+                    12
+                );
+
+                if (sel) {
+                    noFill();
+
+                    stroke(COL.accent);
+
+                    strokeWeight(2);
+
+                    rect(
+                        r[0],
+                        r[1],
+                        r[2],
+                        r[3],
+                        12
+                    );
+                }
+
+                T(
+                    "LEVEL " + i,
+                    r[0] + 70,
+                    r[1] + 24,
+                    18,
+                    sel ? COL.accent : "#fff",
+                    CENTER,
+                    true
+                );
+
+                T(
+                    "Max balls: " + levelBalls(i),
+                    r[0] + 70,
+                    r[1] + 52,
+                    12,
+                    COL.mute
+                );
+
+                T(
+                    "Best: " + fmt(highScores[i] || 0),
+                    r[0] + 70,
+                    r[1] + 72,
+                    12,
+                    COL.gold
+                );
+            }
+
+
+            const hs = inR(mx, my, startR);
+
+            hover = hover || hs;
+
+            btn(
+                startR,
+                "START GAME",
+                "#2563EB",
+                hs
+            );
+
+            T(
+                "Level " + selected +
+                "  |  " + levelBalls(selected) +
+                " balls  |  " + CFG.hits +
+                " hits allowed",
+                DW / 2,
+                442,
+                13,
+                COL.mute
+            );
+
+            T(
+                "Move your mouse to control the blue ball · Click to pause · Press F for full screen",
+                DW / 2,
+                466,
+                11,
+                "#64748B"
+            );
+
+            pop();
+
+            cursor(hover ? HAND : ARROW);
+        }
+
+
+        // --------------------------------------------------
+        // GAME FLOW
+        // --------------------------------------------------
+
+        function startGame() {
+            for (const b of balls) {
+                Composite.remove(engine.world, b.body);
+            }
+
+            balls = [];
+
+            hits = 0;
+
+            survival = 0;
+
+            gt = 0;
+
+            lastHit = -9999;
+
+            acc = 0;
+
+            maxBalls = levelBalls(selected);
+
+            maxHits = CFG.hits;
+
+            const t = target();
+
+            Body.setPosition(pBody, t);
+
+            Body.setVelocity(pBody, {
+                x: 0,
+                y: 0
+            });
+
+            countStart = millis();
+
+            resuming = false;
+
+            confirmExit = false;
+
+            state = "countdown";
+        }
+
+
+        function pauseGame() {
+            confirmExit = false;
+
+            state = "paused";
+        }
+
+
+        function resumeGame() {
+            resuming = true;
+
+            countStart = millis();
+
+            state = "countdown";
+        }
+
+
+        // --------------------------------------------------
+        // PLAYER MOVEMENT
+        // --------------------------------------------------
+
+        // Smooth movement during countdown.
+
+        function glidePlayer() {
+            const t = target();
+
+            const p = pBody.position;
+
+            const k = 1 - exp(-dt * 25);
+
+            Body.setPosition(pBody, {
+                x: p.x + (t.x - p.x) * k,
+                y: p.y + (t.y - p.y) * k
+            });
+
+            Body.setVelocity(pBody, {
+                x: 0,
+                y: 0
+            });
+
+            keepPlayerInsideArena();
+        }
+
+
+        // Physics-driven smooth mouse following.
+
+        function drivePlayer() {
+            const t = target();
+
+            const p = pBody.position;
+
+            const v = pBody.velocity;
+
+            let dx = (t.x - p.x) * 14;
+
+            let dy = (t.y - p.y) * 14;
+
+            const m = Math.hypot(dx, dy);
+
+            const cap = 1800;
+
+            if (m > cap) {
+                dx *= cap / m;
+                dy *= cap / m;
+            }
+
+            const k = 1 - exp(-dt * 18);
+
+            Body.setVelocity(pBody, {
+                x: v.x + (dx / 60 - v.x) * k,
+                y: v.y + (dy / 60 - v.y) * k
+            });
+        }
+
+
+        // --------------------------------------------------
+        // GAME UPDATE
+        // --------------------------------------------------
+
+        function updateGame() {
+            gt += dt * 1000;
+
+            survival = gt / 1000;
+
+
+            // Spawn new balls until the selected level limit.
+
+            if (
+                gt - lastSpawn >= CFG.spawn &&
+                balls.length < maxBalls
+            ) {
+                spawnBall();
+
+                lastSpawn = gt;
+            }
+
+
+            // Activate balls after their initial delay.
+
+            for (const b of balls) {
+                if (
+                    !b.active &&
+                    gt - b.created >= CFG.delay
+                ) {
+                    b.active = true;
+
+                    // Turn on physical wall collision.
+                    b.body.isSensor = false;
+
+                    Body.setVelocity(b.body, {
+                        x: b.v.x / 60,
+                        y: b.v.y / 60
+                    });
+                }
+            }
+
+
+            drivePlayer();
+
+
+            // Run Matter.js physics using a fixed time step.
+
+            acc += dt;
+
+            while (acc >= STEP) {
+                Engine.update(engine, STEP * 1000);
+
+                acc -= STEP;
+            }
+
+
+            // Correct player position after physics update.
+
+            keepPlayerInsideArena();
+
+
+            const maxV = CFG.maxSpeed / 60;
+
+
+            for (const b of balls) {
+
+                // Keep all balls inside the arena.
+                keepBallInsideArena(b);
+
+
+                if (!b.active) {
+                    continue;
+                }
+
+
+                // Limit maximum ball speed.
+
+                const s = Vector.magnitude(b.body.velocity);
+
+                if (s > maxV) {
+                    Body.setVelocity(
+                        b.body,
+                        Vector.mult(b.body.velocity, maxV / s)
+                    );
+                }
+
+
+                // Check player collision.
+
+                checkCollision(b);
+            }
+
+
+            // Game over.
+
+            if (hits >= maxHits) {
+                state = "gameover";
+
+                saveScore(selected, survival);
+            }
+        }
+
+
+        // --------------------------------------------------
+        // HIGH SCORES
+        // --------------------------------------------------
+
+        function saveScore(level, s) {
+            if (s > (highScores[level] || 0)) {
+                highScores[level] = s;
+
+                try {
+                    localStorage.setItem(
+                        "mouseSurvivalScores",
+                        JSON.stringify(highScores)
+                    );
+                } catch (e) {
+                    // Storage may be unavailable.
+                }
+            }
+        }
+
+
+        // --------------------------------------------------
+        // SPAWN BALL
+        // --------------------------------------------------
+
+        function spawnBall() {
+            if (balls.length >= maxBalls) {
+                return;
+            }
+
+            const r = random(6, 15);
+
+            const body = Bodies.circle(
+                width / 2 + random(-15, 15),
+                height / 2 + random(-15, 15),
+                r,
+                {
+                    restitution: 1,
+                    friction: 0,
+                    frictionStatic: 0,
+                    frictionAir: 0,
+                    density: 0.002,
+                    inertia: Infinity,
+
+                    // Initially harmless and non-colliding.
+                    isSensor: true
+                }
+            );
+
+            Composite.add(engine.world, body);
+
+
+            balls.push({
+                body,
+                r,
+                created: gt,
+                safeUntil: gt + CFG.safe,
+                touching: false,
+                active: false,
+
+                v: p5.Vector.random2D().mult(
+                    random(120, 190)
+                )
+            });
+        }
+
+
+        // --------------------------------------------------
+        // COLLISION DETECTION
+        // --------------------------------------------------
+
+        function checkCollision(b) {
+
+            const touching =
+                dist(
+                    pBody.position.x,
+                    pBody.position.y,
+                    b.body.position.x,
+                    b.body.position.y
+                ) <= CFG.radius + b.r;
+
+
+            // Player has left this ball.
+
+            if (!touching) {
+                b.touching = false;
+
+                return;
+            }
+
+
+            // Safe balls cannot cause damage.
+            // Do not mark them as touching permanently:
+            // if they turn dangerous while still overlapping,
+            // the collision should count.
+
+            if (gt < b.safeUntil) {
+                return;
+            }
+
+
+            // Count only a new dangerous contact.
+
+            if (!b.touching) {
+                hits++;
+
+                lastHit = gt;
+
+                // Make this ball safe for 3 seconds.
+
+                b.safeUntil = gt + CFG.safe;
+
+                b.touching = true;
+            }
+        }
+
+
+        // --------------------------------------------------
+        // DRAWING
+        // --------------------------------------------------
+
+        function drawBorder() {
+            noFill();
+
+            stroke(56, 189, 248, 150);
+
+            strokeWeight(2);
+
+            drawingContext.shadowBlur = 12;
+
+            drawingContext.shadowColor = COL.accent;
+
+            rect(
+                M,
+                M,
+                width - 2 * M,
+                height - 2 * M,
+                10
+            );
+
+            drawingContext.shadowBlur = 0;
+        }
+
+
+        function drawGame() {
+            drawBorder();
+
+
+            // Draw balls.
+
+            for (const b of balls) {
+                const safe = gt < b.safeUntil;
+
+                const c = safe ? COL.safe : COL.danger;
+
+                const p = b.body.position;
+
+                drawingContext.shadowBlur = 16;
+
+                drawingContext.shadowColor = c;
+
+                noStroke();
+
+                fill(c);
+
+                circle(
+                    p.x,
+                    p.y,
+                    b.r * 2
+                );
+
+                drawingContext.shadowBlur = 0;
+
+
+                // Countdown before ball activation.
+
+                if (!b.active) {
+                    T(
+                        ceil((CFG.delay - (gt - b.created)) / 1000),
+                        p.x,
+                        p.y - b.r - 12,
+                        11,
+                        "#fff"
+                    );
+                }
+            }
+
+
+            drawPlayer();
+
+            drawHUD();
+        }
+
+
+        // --------------------------------------------------
+        // PLAYER DISPLAY
+        // --------------------------------------------------
+
+        function drawPlayer() {
+            const p = pBody.position;
+
+            const left = hitsLeft();
+
+            const low = left <= max(2, maxHits * 0.25);
+
+            const since = gt - lastHit;
+
+            const r = CFG.radius;
+
+
+            // Hit animation.
+
+            if (since < 500) {
+                noFill();
+
+                stroke(
+                    239,
+                    68,
+                    68,
+                    255 * (1 - since / 500)
+                );
+
+                strokeWeight(3);
+
+                circle(
+                    p.x,
+                    p.y,
+                    r * 2 + since / 8
+                );
+            }
+
+
+            drawingContext.shadowBlur = 20;
+
+            drawingContext.shadowColor = low
+                ? COL.gold
+                : COL.player;
+
+            stroke(low ? COL.gold : "#fff");
+
+            strokeWeight(2);
+
+            fill(COL.player);
+
+            circle(
+                p.x,
+                p.y,
+                r * 2
+            );
+
+            drawingContext.shadowBlur = 0;
+
+
+            T(
+                left,
+                p.x,
+                p.y + 1,
+                left > 99 ? 12 : 16,
+                "#0B1220",
+                CENTER,
+                true
+            );
+        }
+
+
+        // --------------------------------------------------
+        // HUD
+        // --------------------------------------------------
+
+        function drawHUD() {
+            push();
+
+            translate(12, 12);
+
+            stroke(148, 163, 184, 45);
+
+            strokeWeight(1);
+
+            fill(15, 23, 42, 70);
+
+            rect(15, 15, 240, 128, 12);
+
+
+            T(
+                "LEVEL " + selected,
+                30,
+                36,
+                15,
+                "#fff",
+                LEFT,
+                true
+            );
+
+            T(
+                "Survival: " + fmt(survival),
+                30,
+                60,
+                13,
+                COL.gold,
+                LEFT
+            );
+
+
+            const left = hitsLeft();
+
+            const ratio = left / maxHits;
+
+
+            T(
+                "Hits left: " + left + " / " + maxHits,
+                30,
+                84,
+                13,
+                ratio <= 0.3 ? "#F87171" : "#fff",
+                LEFT
+            );
+
+
+            // Health bar.
+
+            fill(30, 41, 59, 120);
+
+            rect(30, 97, 210, 8, 4);
+
+            fill(
+                ratio > 0.5
+                    ? COL.safe
+                    : ratio > 0.3
+                        ? COL.gold
+                        : COL.danger
+            );
+
+            rect(
+                30,
+                97,
+                210 * ratio,
+                8,
+                4
+            );
+
+
+            T(
+                "Balls: " + balls.length + " / " + maxBalls,
+                30,
+                124,
+                12,
+                "#93C5FD",
+                LEFT
+            );
+
+            pop();
+
+
+            // Legend.
+
+            push();
+
+            translate(-12, 12);
+
+            stroke(148, 163, 184, 45);
+
+            strokeWeight(1);
+
+            fill(15, 23, 42, 70);
+
+            rect(
+                width - 135,
+                15,
+                120,
+                62,
+                10
+            );
+
+
+            noStroke();
+
+            fill(COL.safe);
+
+            circle(width - 120, 35, 12);
+
+            T(
+                "Safe",
+                width - 105,
+                35,
+                11,
+                "#fff",
+                LEFT
+            );
+
+
+            fill(COL.danger);
+
+            circle(width - 120, 58, 12);
+
+            T(
+                "Danger",
+                width - 105,
+                58,
+                11,
+                "#fff",
+                LEFT
+            );
+
+            pop();
+        }
+
+
+        // --------------------------------------------------
+        // COUNTDOWN SCREEN
+        // --------------------------------------------------
+
+        function drawCountdown(now) {
+            const el = now - countStart;
+
+            const n = ceil(
+                (CFG.countdown - el) / 1000
+            );
+
+            const f = (el % 1000) / 1000;
+
+
+            noStroke();
+
+            fill(0, 0, 0, 90);
+
+            rect(0, 0, width, height);
+
+
+            T(
+                "GET READY",
+                width / 2,
+                height / 2 - 110,
+                20,
+                COL.mute,
+                CENTER,
+                true
+            );
+
+
+            push();
+
+            translate(
+                width / 2,
+                height / 2
+            );
+
+            scale(1.25 - f * 0.25);
+
+            drawingContext.shadowBlur = 30;
+
+            drawingContext.shadowColor = COL.accent;
+
+            T(
+                n,
+                0,
+                0,
+                140,
+                COL.accent,
+                CENTER,
+                true
+            );
+
+            drawingContext.shadowBlur = 0;
+
+            pop();
+
+
+            T(
+                resuming
+                    ? "The game resumes when the countdown ends"
+                    : "First ball arrives when the countdown ends",
+                width / 2,
+                height / 2 + 110,
+                14,
+                COL.mute
+            );
+        }
+
+
+        // --------------------------------------------------
+        // PAUSE SCREEN
+        // --------------------------------------------------
+
+        function drawPause() {
+            noStroke();
+
+            fill(0, 0, 0, 100);
+
+            rect(0, 0, width, height);
+
+
+            const cx = width / 2;
+
+            const cy = height / 2;
+
+
+            if (confirmExit) {
+                T(
+                    "EXIT TO DASHBOARD?",
+                    cx,
+                    cy - 60,
+                    30,
+                    "#fff",
+                    CENTER,
+                    true
+                );
+
+                T(
+                    "This run will end and its score will not be saved.",
+                    cx,
+                    cy - 15,
+                    15,
+                    COL.mute
+                );
+
+
+                btn(
+                    cfmExit(),
+                    "EXIT",
+                    "#B91C1C",
+                    inR(mouseX, mouseY, cfmExit())
+                );
+
+                btn(
+                    cfmCancel(),
+                    "CANCEL",
+                    "#334155",
+                    inR(mouseX, mouseY, cfmCancel())
+                );
+
+                return;
+            }
+
+
+            T(
+                "PAUSED",
+                cx,
+                cy - 80,
+                42,
+                "#fff",
+                CENTER,
+                true
+            );
+
+            T(
+                "Survival: " + fmt(survival) +
+                "   |   Hits left: " + hitsLeft(),
+                cx,
+                cy - 30,
+                16,
+                COL.gold
+            );
+
+
+            btn(
+                pauseResume(),
+                "RESUME",
+                "#2563EB",
+                inR(mouseX, mouseY, pauseResume())
+            );
+
+            btn(
+                pauseDash(),
+                "DASHBOARD",
+                "#334155",
+                inR(mouseX, mouseY, pauseDash())
+            );
+
+
+            T(
+                "Click anywhere to resume · F for full screen",
+                cx,
+                cy + 105,
+                13,
+                COL.mute
+            );
+        }
+
+
+        // --------------------------------------------------
+        // GAME OVER SCREEN
+        // --------------------------------------------------
+
+        function drawGameOver() {
+            noStroke();
+
+            fill(0, 0, 0, 110);
+
+            rect(0, 0, width, height);
+
+
+            const cx = width / 2;
+
+            const cy = height / 2;
+
+
+            T(
+                "GAME OVER",
+                cx,
+                cy - 80,
+                42,
+                "#F87171",
+                CENTER,
+                true
+            );
+
+            T(
+                "Survival time: " + fmt(survival),
+                cx,
+                cy - 30,
+                18,
+                "#fff"
+            );
+
+            T(
+                "Level " + selected +
+                " Best: " + fmt(highScores[selected] || 0),
+                cx,
+                cy + 5,
+                16,
+                COL.gold
+            );
+
+
+            btn(
+                goTry(),
+                "TRY AGAIN",
+                "#2563EB",
+                inR(mouseX, mouseY, goTry())
+            );
+
+            btn(
+                goDash(),
+                "DASHBOARD",
+                "#334155",
+                inR(mouseX, mouseY, goDash())
+            );
+        }
+
+
+        // --------------------------------------------------
+        // MOUSE AND KEYBOARD INPUT
+        // --------------------------------------------------
+
+        function mousePressed() {
+
+            // Dashboard.
+
+            if (state === "dashboard") {
+                const [mx, my] = toDesign();
+
+                for (let i = 1; i <= 10; i++) {
+                    if (inR(mx, my, cardR(i - 1))) {
+                        selected = i;
+
+                        return;
+                    }
+                }
+
+                if (inR(mx, my, startR)) {
+                    startGame();
+                }
+
+                return;
+            }
+
+
+            // Pause game.
+
+            if (state === "playing") {
+                pauseGame();
+
+                return;
+            }
+
+
+            // Paused game.
+
+            if (state === "paused") {
+
+                if (confirmExit) {
+
+                    if (inR(mouseX, mouseY, cfmExit())) {
+                        confirmExit = false;
+
+                        state = "dashboard";
+                    } else {
+                        confirmExit = false;
+                    }
+
+                } else if (inR(mouseX, mouseY, pauseDash())) {
+
+                    confirmExit = true;
+
+                } else {
+
+                    resumeGame();
+                }
+
+                return;
+            }
+
+
+            if (state === "countdown") {
+                return;
+            }
+
+
+            // Game over.
+
+            if (state === "gameover") {
+
+                if (inR(mouseX, mouseY, goTry())) {
+                    startGame();
+
+                } else if (inR(mouseX, mouseY, goDash())) {
+                    state = "dashboard";
+                }
+            }
+        }
+
+
+        function keyPressed() {
+
+            if (key === "f" || key === "F") {
+                toggleFullscreen();
+
+                return false;
+            }
+
+            if (keyCode === ESCAPE && state === "playing") {
+                pauseGame();
+            }
+        }
+
+
+        // --------------------------------------------------
+        // FULL SCREEN
+        // --------------------------------------------------
+
+        function toggleFullscreen() {
+            try {
+                if (document.fullscreenElement) {
+                    document.exitFullscreen();
+                } else {
+                    document.documentElement.requestFullscreen();
+                }
+            } catch (e) {
+                // Fullscreen may not be supported.
+            }
+        }
+
+    </script>
+
+</body>
+
+</html>
